@@ -20,6 +20,7 @@ package cli
 import (
 	"fmt"
 	"io"
+	"io/ioutil"
 	"log"
 	"os"
 	"os/signal"
@@ -31,9 +32,11 @@ import (
 	"github.com/chzyer/readline"
 	"github.com/fatih/color"
 	"github.com/mattn/go-shellwords"
-	"github.com/satori/go.uuid"
+	uuid "github.com/satori/go.uuid"
+	"gopkg.in/yaml.v3"
 
 	// Merlin
+	listenerAPI "github.com/Ne0nd0g/merlin/pkg/api/listeners"
 	"github.com/Ne0nd0g/merlin/pkg/api/messages"
 	"github.com/Ne0nd0g/merlin/pkg/cli/core"
 	"github.com/Ne0nd0g/merlin/pkg/cli/menu"
@@ -41,6 +44,126 @@ import (
 
 // Global Variables
 var clientID = uuid.NewV4()
+
+var shellListener listener
+var shellListenerOptions map[string]string
+
+type listener struct {
+	id     uuid.UUID // Listener unique identifier
+	name   string    // Listener unique name
+	status string    // Listener server status
+}
+
+type YamListener struct {
+	Name      string `yaml:"Name"`
+	Protocol  string `yaml:"Protocol"`
+	Interface string `yaml:"Interface"`
+	Port      string `yaml:"Port"`
+	PSK       string `yaml:"PSK"`
+}
+
+type YamlConfig struct {
+	AutoStart        string        `yaml:"AutoStart"`
+	AutoSetAllAgents string        `yaml:"AutoSetAllAgents"`
+	Listeners        []YamListener `yaml:"Listeners"`
+}
+
+var GlobalYamlConfig YamlConfig
+
+const DefaultYamlFile = "./config.yaml"
+
+func initializeYamlFile() error {
+	yamlFile := DefaultYamlFile
+
+	yamlFileBytes, err := ioutil.ReadFile(yamlFile)
+	//fmt.Printf("[*] Read YAML file\n")
+	m := fmt.Sprintf("Reading config YAML file")
+	um := messages.UserMessage{
+		Level:   messages.Success,
+		Time:    time.Now().UTC(),
+		Message: m,
+		Error:   false,
+	}
+
+	core.MessageChannel <- um
+
+	if err != nil {
+		//fmt.Printf("[*] Failed to read YAML file: %s\n", err)
+		m := fmt.Sprintf("Failed to read YAML file: %s\n", err)
+		messages.SendBroadcastMessage(messages.UserMessage{
+			Level:   messages.Note,
+			Message: m,
+			Time:    time.Now().UTC(),
+			Error:   false,
+		})
+
+	} else {
+		//fmt.Printf("[*] Parsing YAML file\n")
+		m := fmt.Sprintf("Parsing config YAML file")
+		um := messages.UserMessage{
+			Level:   messages.Success,
+			Time:    time.Now().UTC(),
+			Message: m,
+			Error:   false,
+		}
+
+		core.MessageChannel <- um
+		err = yaml.Unmarshal(yamlFileBytes, &GlobalYamlConfig)
+		if err != nil {
+			//fmt.Printf("[*] Failed to parse YAML file: %s\n", err)
+			m := fmt.Sprintf("Failed to parse YAML file: %s\n", err)
+			messages.SendBroadcastMessage(messages.UserMessage{
+				Level:   messages.Note,
+				Message: m,
+				Time:    time.Now().UTC(),
+				Error:   false,
+			})
+		}
+	}
+
+	return err
+}
+
+func loadYamlConfigFile() {
+	err := initializeYamlFile()
+	if err == nil {
+		if strings.ToLower(GlobalYamlConfig.AutoStart) == "true" {
+			for _, yamlListener := range GlobalYamlConfig.Listeners {
+				shellListenerOptions = listenerAPI.GetListenerOptions(yamlListener.Protocol)
+				shellListenerOptions["Protocol"] = yamlListener.Protocol
+				shellListenerOptions["Interface"] = yamlListener.Interface
+				shellListenerOptions["Port"] = yamlListener.Port
+				shellListenerOptions["Name"] = yamlListener.Name
+				shellListenerOptions["PSK"] = yamlListener.PSK
+
+				um, id := listenerAPI.NewListener(shellListenerOptions)
+				core.MessageChannel <- um
+				if um.Error {
+					return
+				}
+				if id == uuid.Nil {
+					core.MessageChannel <- messages.UserMessage{
+						Level:   messages.Warn,
+						Message: "a nil Listener UUID was returned",
+						Time:    time.Time{},
+						Error:   true,
+					}
+					return
+				}
+
+				shellListener = listener{id: id, name: shellListenerOptions["Name"]}
+				startMessage := listenerAPI.Start(shellListener.name)
+				shellListener.status = listenerAPI.GetListenerStatus(id).Message
+				core.MessageChannel <- startMessage
+				um, shellListenerOptions = listenerAPI.GetListenerConfiguredOptions(shellListener.id)
+				if um.Error {
+					core.MessageChannel <- um
+					break
+				}
+			}
+		}
+	}
+}
 
 // Shell is the exported function to start the command line interface
 func Shell() {
@@ -76,6 +199,7 @@ func Shell() {
 		}
 	}()
 
+	loadYamlConfigFile()
 	log.SetOutput(core.Prompt.Stderr())
 	menu.Set(menu.MAIN)
 

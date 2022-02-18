@@ -1,0 +1,10 @@
+AutoStart: true
+AutoSetAllAgents: true
+Listeners:
+  - Name: "Default"
+    Protocol: "http2"
+    Interface: "0.0.0.0"
+    Port: "4443"
+    PSK: "gabot"
+
+
